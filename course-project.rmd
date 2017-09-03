@@ -1,0 +1,199 @@
+# Course project
+The goal of this project is to predict the manner in which they did the exercise to see how well they do it. 
+The data for this project come from this source  http://groupware.les.inf.puc-rio.br/har.
+
+The training data for this project are available here https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+The test data are available here  https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The analysis consists of following steps:
+
+- Data loading
+- Exploratory data analysis 
+- Model selection
+- Model evaluation
+- Prediction
+
+##Data loading
+```{r cache=TRUE}
+training.raw <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+testing.raw <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+```
+
+##Exploratory data analysis
+
+```{r}
+# Review dimension of data
+dim(training.raw)
+# following output is intentionally not shown due to excessivness information.
+# check data structure 
+#str(training.raw)
+
+# review summary of data; there are lots of NA.
+#summary(training.raw)
+# removing NA and other unused columns
+
+```{r}
+maxNA = 20
+maxNACount <- nrow(training.raw) / 100 * maxNA
+rmColumns <- which(colSums(is.na(training.raw) | training.raw=="") > maxNACount)
+training.cleaned01 <- training.raw[,-rmColumns]
+testing.cleaned01 <- testing.raw[,-rmColumns]
+
+removeColumns <- grep("timestamp", names(training.cleaned01))
+training.cleaned02 <- training.cleaned01[,-c(1, removeColumns )]
+testing.cleaned02 <- testing.cleaned01[,-c(1, removeColumns )]
+```
+
+Next convert all factors to integers
+```{r}
+classLevels <- levels(training.cleaned02$classe)
+training.cleaned03 <- data.frame(data.matrix(training.cleaned02))
+training.cleaned03$classe <- factor(training.cleaned03$classe, labels=classLevels)
+testing.cleaned03 <- data.frame(data.matrix(testing.cleaned02))
+```
+
+Next Finalize data set for analysis
+```{r}
+training.cleaned <- training.cleaned03
+testing.cleaned <- testing.cleaned03
+```
+
+Next dataset is split into 70% train and 30% test.
+
+```{r}
+set.seed(979108)
+library(caret)
+
+classeIndex <- which(names(training.cleaned) == "classe")
+
+partition <- createDataPartition(y=training.cleaned$classe, p=0.70, list=FALSE)
+training.subSetTrain <- training.cleaned[partition, ]
+training.subSetTest <- training.cleaned[-partition, ]
+```
+
+Check for fields that have high correlations with the classe
+
+```{r}
+correlations <- cor(training.subSetTrain[, -classeIndex], as.numeric(training.subSetTrain$classe))
+bestCorrelations <- subset(as.data.frame(as.table(correlations)), abs(Freq)>0.3)
+bestCorrelations
+library(Rmisc)
+library(ggplot2)
+
+p1 <- ggplot(training.subSetTrain, aes(classe,pitch_forearm)) + 
+  geom_boxplot(aes(fill=classe))
+
+p2 <- ggplot(training.subSetTrain, aes(classe, magnet_arm_x)) + 
+  geom_boxplot(aes(fill=classe))
+
+multiplot(p1,p2,cols=2)
+```
+
+##Model Selection
+Next, we will identify variables with high correlations amongst each other in our set so they can be excluded
+
+```{r}
+library(corrplot)
+correlationMatrix <- cor(training.subSetTrain[, -classeIndex])
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.9, exact=TRUE)
+excludeColumns <- c(highlyCorrelated, classeIndex)
+corrplot(correlationMatrix, method="color", type="lower", order="hclust", tl.cex=0.70, tl.col="black", tl.srt = 45, diag = FALSE)
+```
+
+According to the correlation plot, there are some features which are highly correlated. We will use PCA to reduce the dimension
+```{r}
+pcaPreProcess.all <- preProcess(training.subSetTrain[, -classeIndex], method = "pca", thresh = 0.99)
+training.subSetTrain.pca.all <- predict(pcaPreProcess.all, training.subSetTrain[, -classeIndex])
+training.subSetTest.pca.all <- predict(pcaPreProcess.all, training.subSetTest[, -classeIndex])
+testing.pca.all <- predict(pcaPreProcess.all, testing.cleaned[, -classeIndex])
+
+
+pcaPreProcess.subset <- preProcess(training.subSetTrain[, -excludeColumns], method = "pca", thresh = 0.99)
+training.subSetTrain.pca.subset <- predict(pcaPreProcess.subset, training.subSetTrain[, -excludeColumns])
+training.subSetTest.pca.subset <- predict(pcaPreProcess.subset, training.subSetTest[, -excludeColumns])
+testing.pca.subset <- predict(pcaPreProcess.subset, testing.cleaned[, -classeIndex])
+```
+
+Let's try random forest to train the model
+```{r }
+library(randomForest)
+
+ntree <- 50 
+
+start <- proc.time()
+rfMod.exclude <- randomForest(
+  x=training.subSetTrain[, -excludeColumns], 
+  y=training.subSetTrain$classe,
+  xtest=training.subSetTest[, -excludeColumns], 
+  ytest=training.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) #do.trace=TRUE
+proc.time() - start
+
+start <- proc.time()
+rfMod.cleaned <- randomForest(
+  x=training.subSetTrain[, -classeIndex], 
+  y=training.subSetTrain$classe,
+  xtest=training.subSetTest[, -classeIndex], 
+  ytest=training.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) #do.trace=TRUE
+proc.time() - start
+
+start <- proc.time()
+rfMod.pca.all <- randomForest(
+  x=training.subSetTrain.pca.all, 
+  y=training.subSetTrain$classe,
+  xtest=training.subSetTest.pca.all, 
+  ytest=training.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) #do.trace=TRUE
+proc.time() - start
+
+```
+
+##Model Evaluation
+
+We now have 3 trained models. Let's check for their accuracies.
+
+```{r}
+rfMod.cleaned
+rfMod.cleaned.training.acc <- round(1-sum(rfMod.cleaned$confusion[, 'class.error']),3)
+paste0("Accuracy on training: ",rfMod.cleaned.training.acc)
+rfMod.cleaned.testing.acc <- round(1-sum(rfMod.cleaned$test$confusion[, 'class.error']),3)
+paste0("Accuracy on testing: ",rfMod.cleaned.testing.acc)
+
+rfMod.exclude
+rfMod.exclude.training.acc <- round(1-sum(rfMod.exclude$confusion[, 'class.error']),3)
+paste0("Accuracy on training: ",rfMod.exclude.training.acc)
+rfMod.exclude.testing.acc <- round(1-sum(rfMod.exclude$test$confusion[, 'class.error']),3)
+paste0("Accuracy on testing: ",rfMod.exclude.testing.acc)
+
+rfMod.pca.all
+rfMod.pca.all.training.acc <- round(1-sum(rfMod.pca.all$confusion[, 'class.error']),3)
+paste0("Accuracy on training: ",rfMod.pca.all.training.acc)
+rfMod.pca.all.testing.acc <- round(1-sum(rfMod.pca.all$test$confusion[, 'class.error']),3)
+paste0("Accuracy on testing: ",rfMod.pca.all.testing.acc)
+
+```
+
+As shown, rfMod.exclude model performs better among other 3 models.
+
+##Prediction
+Now let's prediction using the best models compared to other less performed models
+
+```{r}
+predictions <- t(cbind(
+    exclude=as.data.frame(predict(rfMod.exclude, testing.cleaned[, -excludeColumns]), optional=TRUE),
+    cleaned=as.data.frame(predict(rfMod.cleaned, testing.cleaned), optional=TRUE),
+    pcaAll=as.data.frame(predict(rfMod.pca.all, testing.pca.all), optional=TRUE)
+))
+predictions
+```
+
+As shown, the best model does not really outperform others very much in terms of prediction. However, since it gave better accuary, we will still choose it over others.
+
+
